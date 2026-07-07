@@ -3,8 +3,8 @@
 //+------------------------------------------------------------------+
 
 #property copyright "Institutional Trader"
-#property version   "3.00"
-#property description "Smart Money Management: HWM Protection + Profit Scaling + Loss Reducer"
+#property version   "3.10"
+#property description "Smart Money Management: HWM Protection + Profit Scaling + Loss Reducer + ATR Trailing Stop"
 
 //=== STRATEGY PARAMETERS ===
 input group "=== STRATEGY PARAMETERS ==="
@@ -48,6 +48,14 @@ input bool Filter_By_Time = false;                    // Enable time filter
 input string Trading_Start = "00:00";                 // Trading start time
 input string Trading_End = "23:59";                   // Trading end time
 input int Min_Trades_Per_Day = 3;                     // Min trades per day target
+
+//=== TRAILING STOP ===
+input group "=== TRAILING STOP ==="
+input bool Use_Trailing_Stop = true;                  // Enable ATR trailing stop
+input bool Use_Breakeven = true;                      // Move SL to breakeven first
+input double Breakeven_ATR = 1.0;                     // ATR profit to trigger breakeven
+input double Trail_Start_ATR = 1.5;                   // ATR profit before trail activates
+input double Trail_Distance_ATR = 1.0;                // ATR distance to trail behind price
 
 //=== EXECUTION SETTINGS ===
 input group "=== EXECUTION SETTINGS ==="
@@ -151,6 +159,9 @@ void OnTick()
             " | Risk Mult: ", DoubleToString(risk_mult, 2),
             " | Loss Streak: ", consecutive_losses);
    }
+
+   // Manage trailing stops on every tick (before entry checks)
+   if(Use_Trailing_Stop) ManageTrailingStops();
 
    if(!IsTradingAllowed())
    {
@@ -288,6 +299,111 @@ bool IsSpreadAcceptable()
       return false;
    }
    return true;
+}
+
+//+------------------------------------------------------------------+
+//| ATR Trailing Stop Manager — runs every tick                     |
+//| Sequence: Breakeven first → then trail once profit > trail_start|
+//+------------------------------------------------------------------+
+void ManageTrailingStops()
+{
+   // Get current ATR value for trail calculations
+   double atr_buf[1];
+   if(CopyBuffer(atr_entry, 0, 0, 1, atr_buf) < 1) return;
+   double atr = atr_buf[0];
+   if(atr <= 0) return;
+
+   double breakeven_dist = atr * Breakeven_ATR;
+   double trail_start    = atr * Trail_Start_ATR;
+   double trail_gap      = atr * Trail_Distance_ATR;
+   int    digits         = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   double point          = _Point;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(!ticket) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != Magic_Number) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+
+      double open_price  = PositionGetDouble(POSITION_PRICE_OPEN);
+      double current_sl  = PositionGetDouble(POSITION_SL);
+      double current_tp  = PositionGetDouble(POSITION_TP);
+      long   pos_type    = PositionGetInteger(POSITION_TYPE);
+      double bid         = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      double ask         = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
+      double new_sl = current_sl;
+
+      if(pos_type == POSITION_TYPE_BUY)
+      {
+         double profit_dist = bid - open_price;
+
+         // Step 1: Breakeven — move SL to open price once profit >= breakeven_dist
+         if(Use_Breakeven && profit_dist >= breakeven_dist)
+         {
+            double be_sl = NormalizeDouble(open_price, digits);
+            if(be_sl > current_sl + point)
+               new_sl = be_sl;
+         }
+
+         // Step 2: Trail — once profit >= trail_start, trail SL behind bid
+         if(profit_dist >= trail_start)
+         {
+            double trail_sl = NormalizeDouble(bid - trail_gap, digits);
+            if(trail_sl > new_sl + point)
+               new_sl = trail_sl;
+         }
+      }
+      else if(pos_type == POSITION_TYPE_SELL)
+      {
+         double profit_dist = open_price - ask;
+
+         // Step 1: Breakeven
+         if(Use_Breakeven && profit_dist >= breakeven_dist)
+         {
+            double be_sl = NormalizeDouble(open_price, digits);
+            if(be_sl < current_sl - point || current_sl == 0)
+               new_sl = be_sl;
+         }
+
+         // Step 2: Trail
+         if(profit_dist >= trail_start)
+         {
+            double trail_sl = NormalizeDouble(ask + trail_gap, digits);
+            if(trail_sl < new_sl - point || new_sl == 0)
+               new_sl = trail_sl;
+         }
+      }
+
+      // Only send a modify request if SL actually improved
+      if(new_sl == current_sl) continue;
+
+      MqlTradeRequest req;
+      MqlTradeResult  res;
+      ZeroMemory(req);
+      ZeroMemory(res);
+      req.action   = TRADE_ACTION_SLTP;
+      req.symbol   = _Symbol;
+      req.position = ticket;
+      req.sl       = new_sl;
+      req.tp       = current_tp;
+
+      bool ok = OrderSend(req, res);
+      if(ok && res.retcode == TRADE_RETCODE_DONE)
+      {
+         if(Show_Debug)
+            Print("Trail SL moved | Ticket: ", ticket,
+                  " | Old SL: ", current_sl,
+                  " | New SL: ", new_sl,
+                  " | ATR: ", NormalizeDouble(atr, digits));
+      }
+      else if(Show_Debug)
+      {
+         Print("Trail SL modify failed | Ticket: ", ticket,
+               " | Code: ", res.retcode);
+      }
+   }
 }
 
 //+------------------------------------------------------------------+
