@@ -184,7 +184,7 @@ void OnTick()
             " | Daily Losses: ", daily_consecutive_losses, "/2",
             " | All-time Streak: ", consecutive_losses,
             daily_drawdown_hit ? " | [DD LIMIT]" : "",
-            daily_consecutive_losses >= 2 ? " | [LOSS STOP]" : "");
+            daily_consecutive_losses >= 3 ? " | [LOSS STOP]" : "");
    }
 
    // Manage trailing stops on every tick (before entry checks)
@@ -257,7 +257,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
       if(Show_Debug) Print("CLOSED LOSS | Loss: $", DoubleToString(deal_profit, 2),
                            " | All-time streak: ", consecutive_losses,
                            " | Daily losses today: ", daily_consecutive_losses,
-                           daily_consecutive_losses >= 2 ? " — DAILY STOP TRIGGERED" : "");
+                           daily_consecutive_losses >= 3 ? " — DAILY STOP TRIGGERED" : "");
    }
 }
 
@@ -494,12 +494,12 @@ void CheckForTrades()
       return;
    }
 
-   // Hard block — stop trading for the day after 2 consecutive losses TODAY
+   // Hard block — stop trading for the day after 3 consecutive losses TODAY
    // Uses daily_consecutive_losses (resets each morning), not the all-time streak
-   if(daily_consecutive_losses >= 2)
+   if(daily_consecutive_losses >= 3)
    {
       if(Show_Debug && tick_count % 300 == 0)
-         Print("2 consecutive losses today — no more trades until tomorrow. Daily losses: ",
+         Print("3 consecutive losses today — no more trades until tomorrow. Daily losses: ",
                daily_consecutive_losses, " | All-time streak: ", consecutive_losses);
       return;
    }
