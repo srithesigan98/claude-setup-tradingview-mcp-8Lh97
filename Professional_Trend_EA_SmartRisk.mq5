@@ -17,7 +17,7 @@ input int EMA_Period_3 = 100;                         // Slow EMA period
 //=== RISK MANAGEMENT ===
 input group "=== RISK MANAGEMENT ==="
 input double Risk_Per_Trade = 0.5;                    // Risk per trade (%)
-input double Max_Daily_Drawdown_Pct = 10.0;           // Max daily drawdown % (trailing from today's peak)
+input double Max_Daily_Drawdown_Pct = 5.0;            // Max daily drawdown % (trailing from today's peak)
 input int Max_Open_Trades = 5;                        // Max concurrent trades
 input bool Use_ATR_Stops = true;                      // Use ATR for stops
 input double ATR_Multiplier = 2.0;                    // ATR multiplier
@@ -482,6 +482,14 @@ void CheckForTrades()
       if(Show_Debug && tick_count % 300 == 0)
          Print("Daily drawdown limit hit — no new trades today. Daily peak: $",
                DoubleToString(daily_peak_equity, 2));
+      return;
+   }
+
+   // Hard block — stop trading for the day after 2 consecutive losses
+   if(consecutive_losses >= 2)
+   {
+      if(Show_Debug && tick_count % 300 == 0)
+         Print("2 consecutive losses today — no more trades until tomorrow. Loss streak: ", consecutive_losses);
       return;
    }
 
