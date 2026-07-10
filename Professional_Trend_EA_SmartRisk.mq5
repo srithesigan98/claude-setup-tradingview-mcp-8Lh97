@@ -3,8 +3,8 @@
 //+------------------------------------------------------------------+
 
 #property copyright "Institutional Trader"
-#property version   "3.10"
-#property description "Smart Money Management: HWM Protection + Profit Scaling + Loss Reducer + ATR Trailing Stop"
+#property version   "3.20"
+#property description "Smart Money Management: Trailing Daily Drawdown + HWM Protection + Profit Scaling + ATR Trailing Stop"
 
 //=== STRATEGY PARAMETERS ===
 input group "=== STRATEGY PARAMETERS ==="
@@ -17,7 +17,7 @@ input int EMA_Period_3 = 100;                         // Slow EMA period
 //=== RISK MANAGEMENT ===
 input group "=== RISK MANAGEMENT ==="
 input double Risk_Per_Trade = 0.5;                    // Risk per trade (%)
-input double Max_Daily_Risk = 2.0;                    // Max daily risk (%)
+input double Max_Daily_Drawdown_Pct = 10.0;           // Max daily drawdown % (trailing from today's peak)
 input int Max_Open_Trades = 5;                        // Max concurrent trades
 input bool Use_ATR_Stops = true;                      // Use ATR for stops
 input double ATR_Multiplier = 2.0;                    // ATR multiplier
@@ -69,17 +69,18 @@ int ema1_trend, ema2_trend, ema3_trend, atr_trend;
 int ema1_entry, ema2_entry, ema3_entry, atr_entry;
 
 //--- Daily tracking
-double daily_risk_used = 0.0;
 datetime last_trade_time = 0;
 int tick_count = 0;
 int today_trades = 0;
-datetime last_day_check = 0;
+datetime last_day_check = 0;          // Stores midnight of last checked day
+double daily_peak_equity = 0.0;       // Highest equity seen TODAY (resets each day)
+bool daily_drawdown_hit = false;      // True once today's 10% drawdown limit is breached
 
 //--- Smart risk tracking
-double initial_equity = 0.0;           // Equity at EA start
-double equity_high_water_mark = 0.0;   // Highest equity ever seen
-int consecutive_losses = 0;            // Current losing streak
-int consecutive_wins = 0;              // Current winning streak
+double initial_equity = 0.0;          // Equity at EA start
+double equity_high_water_mark = 0.0;  // All-time highest equity seen
+int consecutive_losses = 0;           // Current losing streak
+int consecutive_wins = 0;             // Current winning streak
 int total_trades_closed = 0;
 double last_known_positions_profit = 0.0;
 
@@ -88,16 +89,15 @@ double last_known_positions_profit = 0.0;
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   Print("=== SMART RISK PROFESSIONAL EA v3.0 INITIALIZED ===");
+   Print("=== SMART RISK PROFESSIONAL EA v3.20 INITIALIZED ===");
 
-   // Capture baseline equity for profit protection calculations
    initial_equity = AccountInfoDouble(ACCOUNT_EQUITY);
    equity_high_water_mark = initial_equity;
+   daily_peak_equity = initial_equity;   // Today's trailing peak starts at current equity
+   daily_drawdown_hit = false;
 
-   // Reset daily counters
-   MqlDateTime today;
-   TimeCurrent(today);
-   last_day_check = StructToTime(today);
+   // Store midnight of today so we compare DATES not full timestamps (was the "sometimes works" bug)
+   last_day_check = (TimeCurrent() / 86400) * 86400;
 
    // Create trend timeframe indicators
    ema1_trend = iMA(_Symbol, Trend_Timeframe, EMA_Period_1, 0, MODE_EMA, PRICE_CLOSE);
@@ -134,30 +134,54 @@ void OnTick()
 {
    tick_count++;
 
-   // Update high water mark continuously
    double current_equity = AccountInfoDouble(ACCOUNT_EQUITY);
+
+   // Update all-time high water mark
    if(current_equity > equity_high_water_mark)
       equity_high_water_mark = current_equity;
 
-   // Reset daily counters at new day
+   // Update TODAY's trailing peak — drawdown limit rises whenever profit grows
+   // e.g. $1000 start → profits to $1200 → drawdown now measured from $1200 (limit = $120 loss)
+   if(current_equity > daily_peak_equity)
+      daily_peak_equity = current_equity;
+
+   // Check trailing daily drawdown limit every tick
+   if(!daily_drawdown_hit && daily_peak_equity > 0)
+   {
+      double daily_dd_pct = ((daily_peak_equity - current_equity) / daily_peak_equity) * 100.0;
+      if(daily_dd_pct >= Max_Daily_Drawdown_Pct)
+      {
+         daily_drawdown_hit = true;
+         Print("!!! DAILY DRAWDOWN LIMIT HIT: -", DoubleToString(daily_dd_pct, 1), "% from today's peak $",
+               DoubleToString(daily_peak_equity, 2),
+               " | Equity: $", DoubleToString(current_equity, 2),
+               " | No more trades until tomorrow !!!");
+      }
+   }
+
+   // New day — reset daily state
    ResetDailyCounters();
 
    if(Show_Debug && tick_count % 100 == 0)
    {
-      double risk_mult = GetSmartRiskMultiplier();
-      double drawdown_pct = (equity_high_water_mark > 0) ?
-                            ((equity_high_water_mark - current_equity) / equity_high_water_mark) * 100.0 : 0.0;
-      double gain_pct = (initial_equity > 0) ?
-                        ((current_equity - initial_equity) / initial_equity) * 100.0 : 0.0;
+      double risk_mult   = GetSmartRiskMultiplier();
+      double alltime_dd  = (equity_high_water_mark > 0) ?
+                           ((equity_high_water_mark - current_equity) / equity_high_water_mark) * 100.0 : 0.0;
+      double daily_dd    = (daily_peak_equity > 0) ?
+                           ((daily_peak_equity - current_equity) / daily_peak_equity) * 100.0 : 0.0;
+      double gain_pct    = (initial_equity > 0) ?
+                           ((current_equity - initial_equity) / initial_equity) * 100.0 : 0.0;
 
       Print("Heartbeat | Ticks: ", tick_count,
             " | Trades Today: ", today_trades,
             " | Open: ", CountPositions(),
             " | Equity: $", DoubleToString(current_equity, 2),
             " | Gain: ", DoubleToString(gain_pct, 1), "%",
-            " | HWM DD: ", DoubleToString(drawdown_pct, 1), "%",
+            " | Daily DD: ", DoubleToString(daily_dd, 1), "% (peak $", DoubleToString(daily_peak_equity, 2), ")",
+            " | All-time DD: ", DoubleToString(alltime_dd, 1), "%",
             " | Risk Mult: ", DoubleToString(risk_mult, 2),
-            " | Loss Streak: ", consecutive_losses);
+            " | Loss Streak: ", consecutive_losses,
+            daily_drawdown_hit ? " | DAILY LIMIT HIT" : "");
    }
 
    // Manage trailing stops on every tick (before entry checks)
@@ -411,22 +435,29 @@ void ManageTrailingStops()
 //+------------------------------------------------------------------+
 void ResetDailyCounters()
 {
-   MqlDateTime current_time;
-   TimeCurrent(current_time);
-   datetime current_day = StructToTime(current_time);
+   // Compare midnight-of-today against midnight-of-last-checked-day
+   // Dividing by 86400 (seconds per day) strips the time component — fixes the "sometimes works" bug
+   // where StructToTime kept the full timestamp and caused near-constant resets
+   datetime midnight_today = (TimeCurrent() / 86400) * 86400;
 
-   if(current_day != last_day_check)
+   if(midnight_today != last_day_check)
    {
-      daily_risk_used = 0.0;
+      double current_equity = AccountInfoDouble(ACCOUNT_EQUITY);
+
       today_trades = 0;
-      last_day_check = current_day;
+      daily_drawdown_hit = false;
+      daily_peak_equity = current_equity;   // New day: trailing peak resets to current equity
+      last_day_check = midnight_today;
 
       if(Show_Debug)
       {
          Print("=== NEW TRADING DAY ===");
-         Print("Daily counters reset | Risk Mult: ", DoubleToString(GetSmartRiskMultiplier(), 2),
+         Print("Daily peak reset to: $", DoubleToString(daily_peak_equity, 2),
+               " | Drawdown limit: $", DoubleToString(daily_peak_equity * (1.0 - Max_Daily_Drawdown_Pct / 100.0), 2),
+               " (", Max_Daily_Drawdown_Pct, "% = $", DoubleToString(daily_peak_equity * Max_Daily_Drawdown_Pct / 100.0, 2), ")");
+         Print("Risk Mult: ", DoubleToString(GetSmartRiskMultiplier(), 2),
                " | Loss Streak: ", consecutive_losses,
-               " | HWM: $", DoubleToString(equity_high_water_mark, 2));
+               " | All-time HWM: $", DoubleToString(equity_high_water_mark, 2));
       }
    }
 }
@@ -445,10 +476,12 @@ void CheckForTrades()
       return;
    }
 
-   if(daily_risk_used >= Max_Daily_Risk)
+   // Hard block — no new trades if today's trailing drawdown limit is breached
+   if(daily_drawdown_hit)
    {
       if(Show_Debug && tick_count % 300 == 0)
-         Print("Daily risk limit reached: ", daily_risk_used, "%/", Max_Daily_Risk, "%");
+         Print("Daily drawdown limit hit — no new trades today. Daily peak: $",
+               DoubleToString(daily_peak_equity, 2));
       return;
    }
 
@@ -575,14 +608,15 @@ void EnterTrade(int direction)
    if(SendOrder(order_type, adjusted_lot, entry_price, sl, tp))
    {
       last_trade_time = TimeCurrent();
-      daily_risk_used += Risk_Per_Trade * smart_mult; // Track scaled risk, not full risk
       today_trades++;
 
+      double dd_limit_usd = daily_peak_equity * Max_Daily_Drawdown_Pct / 100.0;
       Print("=== TRADE EXECUTED ===");
       Print(EnumToString(order_type), " | Lots: ", adjusted_lot,
             " (", DoubleToString(smart_mult * 100.0, 0), "% of base)");
       Print("Entry: ", entry_price, " | SL: ", sl, " | TP: ", tp);
-      Print("Today: ", today_trades, " trades | Daily Risk Used: ", DoubleToString(daily_risk_used, 2), "%");
+      Print("Today: ", today_trades, " trades | Daily peak: $", DoubleToString(daily_peak_equity, 2),
+            " | Max loss today: $", DoubleToString(dd_limit_usd, 2));
    }
    else
    {
