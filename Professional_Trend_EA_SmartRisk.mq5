@@ -79,8 +79,9 @@ bool daily_drawdown_hit = false;      // True once today's 10% drawdown limit is
 //--- Smart risk tracking
 double initial_equity = 0.0;          // Equity at EA start
 double equity_high_water_mark = 0.0;  // All-time highest equity seen
-int consecutive_losses = 0;           // Current losing streak
-int consecutive_wins = 0;             // Current winning streak
+int consecutive_losses = 0;           // All-time loss streak — used for lot size scaling
+int consecutive_wins = 0;             // All-time win streak
+int daily_consecutive_losses = 0;     // TODAY's loss streak only — resets each day, controls daily stop
 int total_trades_closed = 0;
 double last_known_positions_profit = 0.0;
 
@@ -180,8 +181,10 @@ void OnTick()
             " | Daily DD: ", DoubleToString(daily_dd, 1), "% (peak $", DoubleToString(daily_peak_equity, 2), ")",
             " | All-time DD: ", DoubleToString(alltime_dd, 1), "%",
             " | Risk Mult: ", DoubleToString(risk_mult, 2),
-            " | Loss Streak: ", consecutive_losses,
-            daily_drawdown_hit ? " | DAILY LIMIT HIT" : "");
+            " | Daily Losses: ", daily_consecutive_losses, "/2",
+            " | All-time Streak: ", consecutive_losses,
+            daily_drawdown_hit ? " | [DD LIMIT]" : "",
+            daily_consecutive_losses >= 2 ? " | [LOSS STOP]" : "");
    }
 
    // Manage trailing stops on every tick (before entry checks)
@@ -239,17 +242,22 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
 
    if(deal_profit > 0)
    {
-      consecutive_losses = 0;
+      consecutive_losses = 0;           // All-time streak resets on win
+      daily_consecutive_losses = 0;     // Daily streak also resets on win
       consecutive_wins++;
       if(Show_Debug) Print("CLOSED WIN | Profit: $", DoubleToString(deal_profit, 2),
-                           " | Win Streak: ", consecutive_wins);
+                           " | Win Streak: ", consecutive_wins,
+                           " | Daily losses reset to 0");
    }
    else
    {
       consecutive_wins = 0;
-      consecutive_losses++;
+      consecutive_losses++;             // All-time streak — used for lot scaling
+      daily_consecutive_losses++;       // Daily streak — used for daily stop rule
       if(Show_Debug) Print("CLOSED LOSS | Loss: $", DoubleToString(deal_profit, 2),
-                           " | Loss Streak: ", consecutive_losses);
+                           " | All-time streak: ", consecutive_losses,
+                           " | Daily losses today: ", daily_consecutive_losses,
+                           daily_consecutive_losses >= 2 ? " — DAILY STOP TRIGGERED" : "");
    }
 }
 
@@ -446,7 +454,8 @@ void ResetDailyCounters()
 
       today_trades = 0;
       daily_drawdown_hit = false;
-      daily_peak_equity = current_equity;   // New day: trailing peak resets to current equity
+      daily_peak_equity = current_equity;      // New day: trailing peak resets to current equity
+      daily_consecutive_losses = 0;            // Daily loss counter resets — all-time streak preserved
       last_day_check = midnight_today;
 
       if(Show_Debug)
@@ -485,11 +494,13 @@ void CheckForTrades()
       return;
    }
 
-   // Hard block — stop trading for the day after 2 consecutive losses
-   if(consecutive_losses >= 2)
+   // Hard block — stop trading for the day after 2 consecutive losses TODAY
+   // Uses daily_consecutive_losses (resets each morning), not the all-time streak
+   if(daily_consecutive_losses >= 2)
    {
       if(Show_Debug && tick_count % 300 == 0)
-         Print("2 consecutive losses today — no more trades until tomorrow. Loss streak: ", consecutive_losses);
+         Print("2 consecutive losses today — no more trades until tomorrow. Daily losses: ",
+               daily_consecutive_losses, " | All-time streak: ", consecutive_losses);
       return;
    }
 
