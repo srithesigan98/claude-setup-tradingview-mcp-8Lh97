@@ -3,7 +3,7 @@
 //+------------------------------------------------------------------+
 
 #property copyright "Institutional Trader"
-#property version   "3.20"
+#property version   "3.30"
 #property description "Smart Money Management: Trailing Daily Drawdown + HWM Protection + Profit Scaling + ATR Trailing Stop"
 
 //=== STRATEGY PARAMETERS ===
@@ -44,18 +44,19 @@ input double Lot_Multiplier = 1.0;                    // Lot size multiplier
 
 //=== TRADE FILTERS ===
 input group "=== TRADE FILTERS ==="
-input bool Filter_By_Time = false;                    // Enable time filter
-input string Trading_Start = "00:00";                 // Trading start time
-input string Trading_End = "23:59";                   // Trading end time
-input int Min_Trades_Per_Day = 3;                     // Min trades per day target
+input bool Filter_By_Time = true;                     // Enable time filter (avoid Asian chop)
+input int Trading_Start_Hour = 7;                     // Start hour (server time, London open area)
+input int Trading_End_Hour = 20;                      // End hour (server time, after NY close)
+input int ADX_Period = 14;                            // ADX period for trend strength
+input double Min_ADX = 20.0;                          // Min ADX on trend TF (0=off) — skip chop
 
 //=== TRAILING STOP ===
 input group "=== TRAILING STOP ==="
 input bool Use_Trailing_Stop = true;                  // Enable ATR trailing stop
 input bool Use_Breakeven = true;                      // Move SL to breakeven first
-input double Breakeven_ATR = 1.0;                     // ATR profit to trigger breakeven
-input double Trail_Start_ATR = 1.5;                   // ATR profit before trail activates
-input double Trail_Distance_ATR = 1.0;                // ATR distance to trail behind price
+input double Breakeven_ATR = 1.3;                     // ATR profit to trigger breakeven (was 1.0 — too tight)
+input double Trail_Start_ATR = 2.5;                   // ATR profit before trail activates (was 1.5)
+input double Trail_Distance_ATR = 1.8;                // ATR trail distance (was 1.0 — strangled winners)
 
 //=== EXECUTION SETTINGS ===
 input group "=== EXECUTION SETTINGS ==="
@@ -67,6 +68,7 @@ input bool Show_Debug = true;                         // Show debug messages
 //--- Indicator handles
 int ema1_trend, ema2_trend, ema3_trend, atr_trend;
 int ema1_entry, ema2_entry, ema3_entry, atr_entry;
+int adx_trend;   // ADX on trend timeframe — trend strength filter
 
 //--- Daily tracking
 datetime last_trade_time = 0;
@@ -111,6 +113,7 @@ int OnInit()
    ema2_entry = iMA(_Symbol, Entry_Timeframe, EMA_Period_2, 0, MODE_EMA, PRICE_CLOSE);
    ema3_entry = iMA(_Symbol, Entry_Timeframe, EMA_Period_3, 0, MODE_EMA, PRICE_CLOSE);
    atr_entry  = iATR(_Symbol, Entry_Timeframe, ATR_Period);
+   adx_trend  = iADX(_Symbol, Trend_Timeframe, ADX_Period);
 
    if(ema1_trend == INVALID_HANDLE || ema2_trend == INVALID_HANDLE || ema3_trend == INVALID_HANDLE ||
       ema1_entry == INVALID_HANDLE || ema2_entry == INVALID_HANDLE || ema3_entry == INVALID_HANDLE)
@@ -206,8 +209,9 @@ void OnTick()
    }
 
    // Only evaluate signals on new M1 bar
+   // Evaluate signals once per Entry_Timeframe bar (was M1 — caused overtrading in chop)
    static datetime last_bar = 0;
-   datetime current_bar = iTime(_Symbol, PERIOD_M1, 0);
+   datetime current_bar = iTime(_Symbol, Entry_Timeframe, 0);
    if(current_bar != last_bar)
    {
       last_bar = current_bar;
@@ -504,9 +508,9 @@ void CheckForTrades()
       return;
    }
 
-   if(TimeCurrent() - last_trade_time < 300)
+   if(TimeCurrent() - last_trade_time < 900)
    {
-      if(Show_Debug && tick_count % 300 == 0) Print("Cooldown: waiting 5 min between trades...");
+      if(Show_Debug && tick_count % 300 == 0) Print("Cooldown: waiting 15 min between trades...");
       return;
    }
 
@@ -536,6 +540,19 @@ int GetTradingSignal()
    if(CopyBuffer(ema1_entry, 0, 0, 3, ema1_e) < 3) return 0;
    if(CopyBuffer(ema2_entry, 0, 0, 3, ema2_e) < 3) return 0;
    if(CopyBuffer(ema3_entry, 0, 0, 3, ema3_e) < 3) return 0;
+
+   // Trend strength filter — skip ranging markets where EMA stacks whipsaw back and forth
+   if(Min_ADX > 0)
+   {
+      double adx_buf[1];
+      if(CopyBuffer(adx_trend, 0, 0, 1, adx_buf) < 1) return 0;
+      if(adx_buf[0] < Min_ADX)
+      {
+         if(Show_Debug && tick_count % 300 == 0)
+            Print("ADX ", DoubleToString(adx_buf[0], 1), " < ", Min_ADX, " — ranging market, no trades");
+         return 0;
+      }
+   }
 
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
@@ -824,10 +841,14 @@ bool IsTradingAllowed()
 //+------------------------------------------------------------------+
 bool IsWithinTradingHours()
 {
-   datetime current = TimeCurrent();
-   datetime start   = StringToTime(Trading_Start);
-   datetime end     = StringToTime(Trading_End);
-   return (current >= start && current <= end);
+   MqlDateTime now;
+   TimeCurrent(now);
+   // Simple hour window in server time — e.g. 7 to 20 skips the Asian session
+   // (backtest showed most losing entries clustered at 0:00-2:00 server time)
+   if(Trading_Start_Hour <= Trading_End_Hour)
+      return (now.hour >= Trading_Start_Hour && now.hour < Trading_End_Hour);
+   // Overnight window support (e.g. start 22, end 6)
+   return (now.hour >= Trading_Start_Hour || now.hour < Trading_End_Hour);
 }
 
 //+------------------------------------------------------------------+
@@ -836,7 +857,7 @@ bool IsWithinTradingHours()
 void OnDeinit(const int reason)
 {
    int handles[] = {ema1_trend, ema2_trend, ema3_trend, atr_trend,
-                    ema1_entry, ema2_entry, ema3_entry, atr_entry};
+                    ema1_entry, ema2_entry, ema3_entry, atr_entry, adx_trend};
    for(int i = 0; i < ArraySize(handles); i++)
       if(handles[i] != INVALID_HANDLE) IndicatorRelease(handles[i]);
 
