@@ -3,8 +3,8 @@
 //+------------------------------------------------------------------+
 
 #property copyright "Institutional Trader"
-#property version   "3.30"
-#property description "Smart Money Management: Trailing Daily Drawdown + HWM Protection + Profit Scaling + ATR Trailing Stop"
+#property version   "3.40"
+#property description "v3.10 aggressive engine + Equity Floor Ratchet (never drop below initial after +10%) + 5% trailing daily DD"
 
 //=== STRATEGY PARAMETERS ===
 input group "=== STRATEGY PARAMETERS ==="
@@ -18,6 +18,9 @@ input int EMA_Period_3 = 100;                         // Slow EMA period
 input group "=== RISK MANAGEMENT ==="
 input double Risk_Per_Trade = 0.5;                    // Risk per trade (%)
 input double Max_Daily_Drawdown_Pct = 5.0;            // Max daily drawdown % (trailing from today's peak)
+input bool Use_Equity_Floor = true;                   // Lock-in profit floor (ratchet)
+input double Floor_Step_Pct = 10.0;                   // Every +N% gain, floor rises to previous step
+input bool Close_All_On_Floor_Breach = true;          // Close open trades if equity touches the floor
 input int Max_Open_Trades = 5;                        // Max concurrent trades
 input bool Use_ATR_Stops = true;                      // Use ATR for stops
 input double ATR_Multiplier = 2.0;                    // ATR multiplier
@@ -44,19 +47,19 @@ input double Lot_Multiplier = 1.0;                    // Lot size multiplier
 
 //=== TRADE FILTERS ===
 input group "=== TRADE FILTERS ==="
-input bool Filter_By_Time = true;                     // Enable time filter (avoid Asian chop)
-input int Trading_Start_Hour = 7;                     // Start hour (server time, London open area)
-input int Trading_End_Hour = 20;                      // End hour (server time, after NY close)
+input bool Filter_By_Time = false;                    // Time filter OFF — v3.10 style 24h trading
+input int Trading_Start_Hour = 7;                     // Start hour (server time) if filter enabled
+input int Trading_End_Hour = 20;                      // End hour (server time) if filter enabled
 input int ADX_Period = 14;                            // ADX period for trend strength
-input double Min_ADX = 20.0;                          // Min ADX on trend TF (0=off) — skip chop
+input double Min_ADX = 0.0;                           // ADX filter OFF by default (v3.10 style; set 20 to enable)
 
 //=== TRAILING STOP ===
 input group "=== TRAILING STOP ==="
 input bool Use_Trailing_Stop = true;                  // Enable ATR trailing stop
 input bool Use_Breakeven = true;                      // Move SL to breakeven first
-input double Breakeven_ATR = 1.3;                     // ATR profit to trigger breakeven (was 1.0 — too tight)
-input double Trail_Start_ATR = 2.5;                   // ATR profit before trail activates (was 1.5)
-input double Trail_Distance_ATR = 1.8;                // ATR trail distance (was 1.0 — strangled winners)
+input double Breakeven_ATR = 1.0;                     // ATR profit to trigger breakeven (v3.10 value)
+input double Trail_Start_ATR = 1.5;                   // ATR profit before trail activates (v3.10 value)
+input double Trail_Distance_ATR = 1.0;                // ATR trail distance (v3.10 value)
 
 //=== EXECUTION SETTINGS ===
 input group "=== EXECUTION SETTINGS ==="
@@ -86,6 +89,10 @@ int consecutive_wins = 0;             // All-time win streak
 int daily_consecutive_losses = 0;     // TODAY's loss streak only — resets each day, controls daily stop
 int total_trades_closed = 0;
 double last_known_positions_profit = 0.0;
+
+//--- Equity floor (profit lock-in ratchet)
+double equity_floor = 0.0;            // Equity must never drop below this; 0 = not yet armed
+bool floor_breached = false;          // True once floor is hit — trading halts until EA restart
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -144,6 +151,38 @@ void OnTick()
    if(current_equity > equity_high_water_mark)
       equity_high_water_mark = current_equity;
 
+   // --- Equity floor ratchet ---
+   // Every +10% gain from initial capital locks the floor one step behind:
+   //   equity reaches 110% of start -> floor = 100% (initial capital protected)
+   //   equity reaches 120% of start -> floor = 110%, and so on
+   if(Use_Equity_Floor && initial_equity > 0 && !floor_breached)
+   {
+      double gain_pct = ((current_equity - initial_equity) / initial_equity) * 100.0;
+      int steps = (int)MathFloor(gain_pct / Floor_Step_Pct);
+      if(steps >= 1)
+      {
+         double candidate_floor = initial_equity * (1.0 + (steps - 1) * Floor_Step_Pct / 100.0);
+         if(candidate_floor > equity_floor)
+         {
+            equity_floor = candidate_floor;
+            Print(">>> EQUITY FLOOR RAISED: $", DoubleToString(equity_floor, 2),
+                  " (equity hit +", DoubleToString(steps * Floor_Step_Pct, 0), "% = $",
+                  DoubleToString(current_equity, 2), ")");
+         }
+      }
+
+      // Breach check — equity touched the locked floor
+      if(equity_floor > 0 && current_equity <= equity_floor)
+      {
+         floor_breached = true;
+         Print("!!! EQUITY FLOOR BREACHED at $", DoubleToString(current_equity, 2),
+               " (floor: $", DoubleToString(equity_floor, 2), ") — TRADING HALTED. Restart EA to resume. !!!");
+         if(Close_All_On_Floor_Breach)
+            CloseAllEAPositions();
+      }
+   }
+   // --- End equity floor ---
+
    // Update TODAY's trailing peak — drawdown limit rises whenever profit grows
    // e.g. $1000 start → profits to $1200 → drawdown now measured from $1200 (limit = $120 loss)
    if(current_equity > daily_peak_equity)
@@ -184,10 +223,11 @@ void OnTick()
             " | Daily DD: ", DoubleToString(daily_dd, 1), "% (peak $", DoubleToString(daily_peak_equity, 2), ")",
             " | All-time DD: ", DoubleToString(alltime_dd, 1), "%",
             " | Risk Mult: ", DoubleToString(risk_mult, 2),
-            " | Daily Losses: ", daily_consecutive_losses, "/2",
-            " | All-time Streak: ", consecutive_losses,
+            " | Daily Losses: ", daily_consecutive_losses, "/3",
+            " | Floor: $", DoubleToString(equity_floor, 2),
             daily_drawdown_hit ? " | [DD LIMIT]" : "",
-            daily_consecutive_losses >= 3 ? " | [LOSS STOP]" : "");
+            daily_consecutive_losses >= 3 ? " | [LOSS STOP]" : "",
+            floor_breached ? " | [FLOOR BREACHED - HALTED]" : "");
    }
 
    // Manage trailing stops on every tick (before entry checks)
@@ -209,9 +249,9 @@ void OnTick()
    }
 
    // Only evaluate signals on new M1 bar
-   // Evaluate signals once per Entry_Timeframe bar (was M1 — caused overtrading in chop)
+   // Evaluate signals on every new M1 bar — v3.10 style frequent trading
    static datetime last_bar = 0;
-   datetime current_bar = iTime(_Symbol, Entry_Timeframe, 0);
+   datetime current_bar = iTime(_Symbol, PERIOD_M1, 0);
    if(current_bar != last_bar)
    {
       last_bar = current_bar;
@@ -315,9 +355,69 @@ double GetSmartRiskMultiplier()
    }
 
    // Hard floor: never less than 20% of intended lot
+   // --- 4. Equity floor proximity reduction ---
+   // The closer equity sits to the locked floor, the smaller the trades —
+   // so a losing trade can't smash through the floor
+   if(Use_Equity_Floor && equity_floor > 0 && equity > equity_floor)
+   {
+      double room_pct = ((equity - equity_floor) / equity) * 100.0;
+      if(room_pct < 3.0)
+         mult = MathMin(mult, 0.25);   // Very close to floor — minimum size
+      else if(room_pct < 6.0)
+         mult = MathMin(mult, 0.50);
+      else if(room_pct < 10.0)
+         mult = MathMin(mult, 0.75);
+   }
+
    mult = MathMax(mult, 0.20);
 
    return mult;
+}
+
+//+------------------------------------------------------------------+
+//| Close all positions belonging to this EA on this symbol          |
+//+------------------------------------------------------------------+
+void CloseAllEAPositions()
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(!ticket) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != Magic_Number) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+
+      long   pos_type = PositionGetInteger(POSITION_TYPE);
+      double volume   = PositionGetDouble(POSITION_VOLUME);
+
+      MqlTradeRequest req;
+      MqlTradeResult  res;
+      ZeroMemory(req);
+      ZeroMemory(res);
+      req.action       = TRADE_ACTION_DEAL;
+      req.symbol       = _Symbol;
+      req.position     = ticket;
+      req.volume       = volume;
+      req.deviation    = 20;
+      req.magic        = Magic_Number;
+      req.comment      = "FloorBreach_Close";
+      req.type_filling = ORDER_FILLING_FOK;
+
+      if(pos_type == POSITION_TYPE_BUY)
+      {
+         req.type  = ORDER_TYPE_SELL;
+         req.price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      }
+      else
+      {
+         req.type  = ORDER_TYPE_BUY;
+         req.price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      }
+
+      if(OrderSend(req, res) && res.retcode == TRADE_RETCODE_DONE)
+         Print("Floor breach: closed position #", ticket);
+      else
+         Print("Floor breach: FAILED to close #", ticket, " retcode: ", res.retcode);
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -489,6 +589,14 @@ void CheckForTrades()
       return;
    }
 
+   // Hard block — equity floor was breached, trading halted until EA restart
+   if(floor_breached)
+   {
+      if(Show_Debug && tick_count % 500 == 0)
+         Print("Equity floor breached — trading halted. Floor: $", DoubleToString(equity_floor, 2));
+      return;
+   }
+
    // Hard block — no new trades if today's trailing drawdown limit is breached
    if(daily_drawdown_hit)
    {
@@ -508,9 +616,9 @@ void CheckForTrades()
       return;
    }
 
-   if(TimeCurrent() - last_trade_time < 900)
+   if(TimeCurrent() - last_trade_time < 300)
    {
-      if(Show_Debug && tick_count % 300 == 0) Print("Cooldown: waiting 15 min between trades...");
+      if(Show_Debug && tick_count % 300 == 0) Print("Cooldown: waiting 5 min between trades...");
       return;
    }
 
