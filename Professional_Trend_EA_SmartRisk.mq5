@@ -18,8 +18,8 @@ input int EMA_Period_3 = 100;                         // Slow EMA period
 input group "=== RISK MANAGEMENT ==="
 input double Risk_Per_Trade = 0.5;                    // Risk per trade (%)
 input double Max_Daily_Drawdown_Pct = 5.0;            // Max daily drawdown % (trailing from today's peak)
-input bool Use_Equity_Floor = true;                   // Lock-in profit floor (ratchet)
-input double Floor_Step_Pct = 10.0;                   // Every +N% gain, floor rises to previous step
+input bool Use_Equity_Floor = true;                   // Lock-in profit floor (trails below peak)
+input double Floor_Step_Pct = 10.0;                   // Floor trails N% below peak equity (arms after +N% gain)
 input bool Close_All_On_Floor_Breach = true;          // Close open trades if equity touches the floor
 input int Max_Open_Trades = 5;                        // Max concurrent trades
 input bool Use_ATR_Stops = true;                      // Use ATR for stops
@@ -151,23 +151,25 @@ void OnTick()
    if(current_equity > equity_high_water_mark)
       equity_high_water_mark = current_equity;
 
-   // --- Equity floor ratchet ---
-   // Every +10% gain from initial capital locks the floor one step behind:
-   //   equity reaches 110% of start -> floor = 100% (initial capital protected)
-   //   equity reaches 120% of start -> floor = 110%, and so on
+   // --- Equity floor: trails 10% below peak equity ---
+   // Arms once equity has gained 10% from initial capital. From then on the
+   // floor is always (peak equity - 10%), rising with every new peak, and it
+   // never sits below the initial capital.
+   //   Peak $1,100 -> floor $1,000 (initial protected)
+   //   Peak $1,500 -> floor $1,350
+   //   Peak $2,400 -> floor $2,160
    if(Use_Equity_Floor && initial_equity > 0 && !floor_breached)
    {
-      double gain_pct = ((current_equity - initial_equity) / initial_equity) * 100.0;
-      int steps = (int)MathFloor(gain_pct / Floor_Step_Pct);
-      if(steps >= 1)
+      if(equity_high_water_mark >= initial_equity * (1.0 + Floor_Step_Pct / 100.0))
       {
-         double candidate_floor = initial_equity * (1.0 + (steps - 1) * Floor_Step_Pct / 100.0);
+         double candidate_floor = equity_high_water_mark * (1.0 - Floor_Step_Pct / 100.0);
+         candidate_floor = MathMax(candidate_floor, initial_equity); // never below starting capital
          if(candidate_floor > equity_floor)
          {
             equity_floor = candidate_floor;
             Print(">>> EQUITY FLOOR RAISED: $", DoubleToString(equity_floor, 2),
-                  " (equity hit +", DoubleToString(steps * Floor_Step_Pct, 0), "% = $",
-                  DoubleToString(current_equity, 2), ")");
+                  " (", DoubleToString(Floor_Step_Pct, 0), "% below peak $",
+                  DoubleToString(equity_high_water_mark, 2), ")");
          }
       }
 
