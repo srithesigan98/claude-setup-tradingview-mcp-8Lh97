@@ -3,7 +3,7 @@
 //+------------------------------------------------------------------+
 
 #property copyright "Institutional Trader"
-#property version   "3.40"
+#property version   "3.42"
 #property description "v3.10 aggressive engine + Equity Floor Ratchet (never drop below initial after +10%) + 5% trailing daily DD"
 
 //=== STRATEGY PARAMETERS ===
@@ -41,9 +41,11 @@ input double Max_Spread_Points = 50.0;               // Max allowed spread in po
 
 //=== DYNAMIC LOT SETTINGS ===
 input group "=== DYNAMIC LOT SETTINGS ==="
-input bool Use_Dynamic_Lots = true;                   // Enable dynamic lot sizing
-input double Base_Equity = 100.0;                     // Base equity for 0.01 lots
-input double Lot_Multiplier = 1.0;                    // Lot size multiplier
+input bool Use_Dynamic_Lots = true;                   // Enable linear equity-based lot sizing
+input double Starting_Lot_Size = 0.01;                // Lot size at initial capital
+input double Equity_Step_USD = 100.0;                 // Every $N of profit growth...
+input double Lot_Increase_Per_Step = 0.03;            // ...adds this many lots
+input double Lot_Multiplier = 1.0;                    // Extra scaling on top (1.0 = no change)
 
 //=== TRADE FILTERS ===
 input group "=== TRADE FILTERS ==="
@@ -52,6 +54,8 @@ input int Trading_Start_Hour = 7;                     // Start hour (server time
 input int Trading_End_Hour = 20;                      // End hour (server time) if filter enabled
 input int ADX_Period = 14;                            // ADX period for trend strength
 input double Min_ADX = 0.0;                           // ADX filter OFF by default (v3.10 style; set 20 to enable)
+input bool Require_Candle_Close_Confirm = false;      // Use last CLOSED bar's close vs EMA (filters live-tick noise)
+input bool Require_EMA_Slope = false;                 // Fast EMA must be rising(buy)/falling(sell), not flat
 
 //=== TRAILING STOP ===
 input group "=== TRAILING STOP ==="
@@ -668,9 +672,17 @@ int GetTradingSignal()
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double mid = (ask + bid) / 2.0;
 
+   // Optional: use the last CLOSED candle's close instead of the live mid-tick price.
+   // Live price flickers around the EMA constantly; a closed-bar confirmation
+   // filters out signals that only existed for a single noisy tick.
+   double confirm_price = mid;
+   if(Require_Candle_Close_Confirm)
+      confirm_price = iClose(_Symbol, Entry_Timeframe, 1);
+
    // BUY: Trend aligned up + entry fast EMA > medium EMA + price above fast EMA
    bool trend_bull = (ema1_t[2] > ema2_t[2] && ema2_t[2] > ema3_t[2]);
-   bool entry_bull = (ema1_e[2] > ema2_e[2]) && (mid > ema1_e[2]);
+   bool entry_bull = (ema1_e[2] > ema2_e[2]) && (confirm_price > ema1_e[2]);
+   if(Require_EMA_Slope) entry_bull = entry_bull && (ema1_e[2] > ema1_e[1]);
 
    if(trend_bull && entry_bull)
    {
@@ -680,7 +692,8 @@ int GetTradingSignal()
 
    // SELL: Trend aligned down + entry fast EMA < medium EMA + price below fast EMA
    bool trend_bear = (ema1_t[2] < ema2_t[2] && ema2_t[2] < ema3_t[2]);
-   bool entry_bear = (ema1_e[2] < ema2_e[2]) && (mid < ema1_e[2]);
+   bool entry_bear = (ema1_e[2] < ema2_e[2]) && (confirm_price < ema1_e[2]);
+   if(Require_EMA_Slope) entry_bear = entry_bear && (ema1_e[2] < ema1_e[1]);
 
    if(trend_bear && entry_bear)
    {
@@ -780,13 +793,12 @@ double CalculateBaseLotSize(double entry_price, double sl_price, ENUM_ORDER_TYPE
 
    if(Use_Dynamic_Lots)
    {
-      // Equity tier-based lots
-      if(equity >= 10000)      base_lot = 0.20;
-      else if(equity >= 5000)  base_lot = 0.10;
-      else if(equity >= 2000)  base_lot = 0.05;
-      else if(equity >= 1000)  base_lot = 0.03;
-      else if(equity >= 500)   base_lot = 0.02;
-      else                     base_lot = 0.01;
+      // Linear equity-growth lot sizing: for every $Equity_Step_USD gained
+      // above initial capital, add Lot_Increase_Per_Step lots.
+      // e.g. start $1000 @ 0.01 lot -> equity $1300 (+$300) -> 0.01 + 3*0.03 = 0.10 lot
+      double profit_growth = MathMax(0.0, equity - initial_equity);
+      int steps = (Equity_Step_USD > 0) ? (int)MathFloor(profit_growth / Equity_Step_USD) : 0;
+      base_lot = Starting_Lot_Size + (steps * Lot_Increase_Per_Step);
 
       base_lot *= Lot_Multiplier;
    }
