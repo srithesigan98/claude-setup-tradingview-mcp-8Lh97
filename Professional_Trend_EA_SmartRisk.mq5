@@ -3,8 +3,8 @@
 //+------------------------------------------------------------------+
 
 #property copyright "Institutional Trader"
-#property version   "3.43"
-#property description "v3.10 aggressive engine + Equity Floor Ratchet (never drop below initial after +10%) + 5% trailing daily DD"
+#property version   "3.44"
+#property description "v3.10 engine + Equity Floor + 5% Daily DD + 3-Loss Daily Stop + 20% Margin Cap + Full Rejection Logging"
 
 //=== STRATEGY PARAMETERS ===
 input group "=== STRATEGY PARAMETERS ==="
@@ -18,6 +18,7 @@ input int EMA_Period_3 = 100;                         // Slow EMA period
 input group "=== RISK MANAGEMENT ==="
 input double Risk_Per_Trade = 0.5;                    // Risk per trade (%)
 input double Max_Daily_Drawdown_Pct = 5.0;            // Max daily drawdown % (trailing from today's peak)
+input double Max_Margin_Pct_Per_Trade = 20.0;         // Cap: required margin per trade <= this % of equity
 input bool Use_Equity_Floor = true;                   // Lock-in profit floor (trails below peak)
 input double Floor_Step_Pct = 10.0;                   // Floor trails N% below peak equity (arms after +N% gain)
 input bool Close_All_On_Floor_Breach = true;          // Close open trades if equity touches floor (trading still continues after)
@@ -448,7 +449,7 @@ bool IsSpreadAcceptable()
    if(spread > (long)Max_Spread_Points)
    {
       if(Show_Debug && tick_count % 100 == 0)
-         Print("Spread rejected: ", spread, " pts (max: ", Max_Spread_Points, ")");
+         Print("REJECTED (spread): ", spread, " pts > max ", Max_Spread_Points, " pts");
       return false;
    }
    return true;
@@ -602,21 +603,22 @@ void CheckForTrades()
    if(CountPositions() >= Max_Open_Trades)
    {
       if(Show_Debug && tick_count % 300 == 0)
-         Print("Max trades reached: ", CountPositions(), "/", Max_Open_Trades);
+         Print("REJECTED (max-trades): ", CountPositions(), "/", Max_Open_Trades, " open");
       return;
    }
 
    // Note: equity floor breach no longer halts trading — it only closes positions
    // to lock the gain. Trading resumes immediately at a reduced size (see
-   // GetSmartRiskMultiplier floor-proximity step). The only conditions that
-   // pause trading are the two below, and both clear automatically next day.
+   // GetSmartRiskMultiplier floor-proximity step). Only the two conditions below
+   // ever pause new entries, and both clear automatically next day — per user
+   // rule: winning streaks never stop trading, only 3 losses in a day do.
 
    // Hard block — no new trades if today's trailing drawdown limit is breached
    if(daily_drawdown_hit)
    {
       if(Show_Debug && tick_count % 300 == 0)
-         Print("Daily drawdown limit hit — no new trades today. Daily peak: $",
-               DoubleToString(daily_peak_equity, 2));
+         Print("REJECTED (daily-drawdown): today's peak $", DoubleToString(daily_peak_equity, 2),
+               " — no new trades until tomorrow");
       return;
    }
 
@@ -625,14 +627,16 @@ void CheckForTrades()
    if(daily_consecutive_losses >= 3)
    {
       if(Show_Debug && tick_count % 300 == 0)
-         Print("3 consecutive losses today — no more trades until tomorrow. Daily losses: ",
-               daily_consecutive_losses, " | All-time streak: ", consecutive_losses);
+         Print("REJECTED (3-loss-daily-stop): ", daily_consecutive_losses,
+               " losses today | all-time streak: ", consecutive_losses,
+               " — no more trades until tomorrow");
       return;
    }
 
    if(TimeCurrent() - last_trade_time < 300)
    {
-      if(Show_Debug && tick_count % 300 == 0) Print("Cooldown: waiting 5 min between trades...");
+      if(Show_Debug && tick_count % 300 == 0)
+         Print("REJECTED (cooldown): ", (300 - (TimeCurrent() - last_trade_time)), "s remaining");
       return;
    }
 
@@ -643,8 +647,12 @@ void CheckForTrades()
       if(Show_Debug)
          Print("Signal: ", signal > 0 ? "BUY" : "SELL",
                " | Smart Risk Mult: ", DoubleToString(smart_mult, 2),
-               " (HWM DD + Profit Protect + Loss Streak combined)");
+               " (HWM DD + Profit Protect + Loss Streak + Floor Proximity combined)");
       EnterTrade(signal);
+   }
+   else if(Show_Debug && tick_count % 300 == 0)
+   {
+      Print("REJECTED (no-signal): trend/entry EMA stack not aligned this bar");
    }
 }
 
@@ -745,6 +753,7 @@ void EnterTrade(int direction)
    // Apply smart risk multiplier
    double smart_mult = GetSmartRiskMultiplier();
    double adjusted_lot = base_lot * smart_mult;
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
 
    // Normalize to broker requirements
    double min_lot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
@@ -756,8 +765,43 @@ void EnterTrade(int direction)
 
    if(adjusted_lot < min_lot)
    {
-      if(Show_Debug) Print("Lot below minimum after smart scaling — skipping trade");
+      if(Show_Debug) Print("REJECTED (lot-too-small): base=", DoubleToString(base_lot, 2),
+                           " x smart_mult=", DoubleToString(smart_mult, 2),
+                           " = ", DoubleToString(base_lot * smart_mult, 4),
+                           " lots — below broker minimum ", DoubleToString(min_lot, 2));
       return;
+   }
+
+   // --- Margin cap: required margin for this trade must not exceed
+   // Max_Margin_Pct_Per_Trade % of current equity. Shrinks the lot if needed.
+   if(Max_Margin_Pct_Per_Trade > 0 && equity > 0)
+   {
+      double margin_required = 0.0;
+      if(OrderCalcMargin(order_type, _Symbol, adjusted_lot, entry_price, margin_required))
+      {
+         double margin_cap = equity * Max_Margin_Pct_Per_Trade / 100.0;
+         if(margin_required > margin_cap && margin_required > 0)
+         {
+            double scale = margin_cap / margin_required;
+            double capped_lot = adjusted_lot * scale;
+            capped_lot = NormalizeDouble(capped_lot / step_lot, 0) * step_lot;
+            capped_lot = MathMax(min_lot, MathMin(max_lot, capped_lot));
+
+            if(Show_Debug)
+               Print("Margin cap applied: required $", DoubleToString(margin_required, 2),
+                     " > cap $", DoubleToString(margin_cap, 2), " (", Max_Margin_Pct_Per_Trade, "% of equity) | ",
+                     "Lot reduced ", DoubleToString(adjusted_lot, 2), " -> ", DoubleToString(capped_lot, 2));
+
+            adjusted_lot = capped_lot;
+
+            if(adjusted_lot < min_lot)
+            {
+               if(Show_Debug) Print("REJECTED (margin-cap): even minimum lot exceeds ",
+                                    Max_Margin_Pct_Per_Trade, "% margin cap — skipping trade");
+               return;
+            }
+         }
+      }
    }
 
    if(Show_Debug)
@@ -778,9 +822,15 @@ void EnterTrade(int direction)
       today_trades++;
 
       double dd_limit_usd = daily_peak_equity * Max_Daily_Drawdown_Pct / 100.0;
+      double final_margin = 0.0;
+      OrderCalcMargin(order_type, _Symbol, adjusted_lot, entry_price, final_margin);
+      double margin_pct_used = (equity > 0) ? (final_margin / equity) * 100.0 : 0.0;
+
       Print("=== TRADE EXECUTED ===");
       Print(EnumToString(order_type), " | Lots: ", adjusted_lot,
-            " (", DoubleToString(smart_mult * 100.0, 0), "% of base)");
+            " (", DoubleToString(smart_mult * 100.0, 0), "% of base)",
+            " | Margin: $", DoubleToString(final_margin, 2),
+            " (", DoubleToString(margin_pct_used, 1), "% of equity, cap ", Max_Margin_Pct_Per_Trade, "%)");
       Print("Entry: ", entry_price, " | SL: ", sl, " | TP: ", tp);
       Print("Today: ", today_trades, " trades | Daily peak: $", DoubleToString(daily_peak_equity, 2),
             " | Max loss today: $", DoubleToString(dd_limit_usd, 2));
