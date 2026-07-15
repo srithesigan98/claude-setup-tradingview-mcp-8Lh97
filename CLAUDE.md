@@ -9,7 +9,26 @@ The user's original problem: the EA was profitable but would double the account
 and then give all the gains back by over-risking. All work since has been about
 money management, not the entry strategy.
 
-## Current version: v3.43 (HEAD)
+## Current version: v3.44 (HEAD)
+**v3.44 additions (per user's /goal + council decision):**
+- 20% margin cap per trade: `Max_Margin_Pct_Per_Trade` input, checked via
+  `OrderCalcMargin()` in `EnterTrade()`. If required margin exceeds 20% of
+  current equity, lot is scaled down proportionally (re-normalized to lot
+  step); trade skipped only if even min lot still exceeds the cap.
+- Full rejection-reason logging: every skip path now prints a consistent
+  `"REJECTED (reason):"` line (max-trades, daily-drawdown, 3-loss-stop,
+  cooldown, no-signal, spread, lot-too-small, margin-cap). This was the
+  council's call — diagnose the "still same, low frequency" complaint from
+  real log evidence before writing another speculative fix. User confirmed
+  they re-tested v3.43 and the flatline persisted mid-period (not
+  end-of-test), so a real cause remains to be pinned down from this logging
+  — waiting on user to send a log excerpt from the flat period.
+- /goal active this session: "trade continues indefinitely on wins, only
+  3-loss daily stop pauses trading (already implemented), 20% margin cap
+  per trade (implemented this version)." Session has a Stop-hook goal — do
+  not end turns without progressing this until satisfied/cleared.
+
+## Previous version: v3.43
 **v3.43 fix — critical:** v3.40's equity floor breach set `floor_breached=true`
 permanently, and `CheckForTrades()` hard-blocked all new entries while that flag
 was set, requiring a manual EA restart to clear. User reported a backtest chart
