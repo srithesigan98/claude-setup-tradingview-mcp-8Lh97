@@ -9,8 +9,27 @@ The user's original problem: the EA was profitable but would double the account
 and then give all the gains back by over-risking. All work since has been about
 money management, not the entry strategy.
 
-## Current version: v3.45 (HEAD)
-**v3.45:** Full line-by-line audit of all 1053 lines (no MT5/MetaEditor available
+## Current version: v3.45 (HEAD) + tests/validate_ea_rules.py
+**Validation status (important — read before claiming "done"):**
+Built `tests/validate_ea_rules.py`, a Python reference implementation
+transcribed line-for-line from the actual .mq5 source (cross-checked via
+grep against real line numbers, not written from memory) and exercised
+with assertions. All 4 pass: unlimited win streak (50 wins, never stops),
+3-loss daily stop + mid-day win reset + next-day reset, 20% margin cap
+(2.0 lot on $1000 equity @ $2000/oz correctly scaled to 0.1 lot = exactly
+20%), and all 8 REJECTED(reason) log strings distinct/complete.
+**This is NOT equivalent to an MT5 compile or backtest.** It proves the
+transcribed arithmetic/control-flow is internally consistent; it cannot
+catch MQL5 syntax errors, OrderSend/broker fill behavior, indicator
+warm-up timing, or real tick-data signal frequency (the low-frequency /
+flatline question is still unresolved — needs the user's actual Experts
+log). No MetaEditor/MT5 binary exists in this sandbox (confirmed: no
+mql5/mt5/wine/metaeditor, no .ex5 files) — compiling and backtesting is a
+step only the user can do. Be honest about this distinction if asked
+whether the EA "works."
+
+## v3.45 (code)
+Full line-by-line audit of all 1053 lines (no MT5/MetaEditor available
 in this environment — cannot compile or backtest directly, verified confirmed:
 no mql5/mt5/wine/metaeditor binaries, no .ex5 files found). Traced every
 trade-blocking condition; none latches permanently except the v3.43-fixed floor.
