@@ -9,7 +9,22 @@ The user's original problem: the EA was profitable but would double the account
 and then give all the gains back by over-risking. All work since has been about
 money management, not the entry strategy.
 
-## Current version: v3.41 (HEAD)
+## Current version: v3.42 (HEAD)
+**v3.42 additions (on top of v3.41):**
+- Lot sizing rule replaced per explicit user spec: for every $100 (`Equity_Step_USD`)
+  of profit growth above initial capital, add 0.03 lots (`Lot_Increase_Per_Step`).
+  Starts at `Starting_Lot_Size` (0.01). Formula: `base_lot = Starting_Lot_Size +
+  floor((equity - initial_equity)/Equity_Step_USD) * Lot_Increase_Per_Step`.
+  Replaces the old fixed equity-tier table. Naturally shrinks back down in
+  drawdown since it reads live equity every trade.
+- Two OPTIONAL entry-accuracy filters added, both default **false** (v3.10
+  behaviour unchanged unless user opts in): `Require_Candle_Close_Confirm`
+  (use last closed bar's close vs EMA instead of live mid-tick price) and
+  `Require_EMA_Slope` (fast EMA must be actively rising/falling, not flat).
+- Equity floor logic itself is UNCHANGED from v3.41 — user re-confirmed the
+  continuous 10%-below-peak trail is correct, no edit was needed there.
+
+
 **Engine:** v3.10 aggressive defaults (the user's preferred trading behaviour):
 24h trading (time filter OFF), ADX filter OFF (input exists, default 0),
 M1-bar signal checks, 5-min cooldown, trailing stop BE=1.0 ATR /
