@@ -3,7 +3,7 @@
 //+------------------------------------------------------------------+
 
 #property copyright "Institutional Trader"
-#property version   "3.42"
+#property version   "3.43"
 #property description "v3.10 aggressive engine + Equity Floor Ratchet (never drop below initial after +10%) + 5% trailing daily DD"
 
 //=== STRATEGY PARAMETERS ===
@@ -20,7 +20,7 @@ input double Risk_Per_Trade = 0.5;                    // Risk per trade (%)
 input double Max_Daily_Drawdown_Pct = 5.0;            // Max daily drawdown % (trailing from today's peak)
 input bool Use_Equity_Floor = true;                   // Lock-in profit floor (trails below peak)
 input double Floor_Step_Pct = 10.0;                   // Floor trails N% below peak equity (arms after +N% gain)
-input bool Close_All_On_Floor_Breach = true;          // Close open trades if equity touches the floor
+input bool Close_All_On_Floor_Breach = true;          // Close open trades if equity touches floor (trading still continues after)
 input int Max_Open_Trades = 5;                        // Max concurrent trades
 input bool Use_ATR_Stops = true;                      // Use ATR for stops
 input double ATR_Multiplier = 2.0;                    // ATR multiplier
@@ -96,7 +96,7 @@ double last_known_positions_profit = 0.0;
 
 //--- Equity floor (profit lock-in ratchet)
 double equity_floor = 0.0;            // Equity must never drop below this; 0 = not yet armed
-bool floor_breached = false;          // True once floor is hit — trading halts until EA restart
+bool floor_breached = false;          // True while equity sits at/below the floor (log flag only, not a trading gate)
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -162,7 +162,12 @@ void OnTick()
    //   Peak $1,100 -> floor $1,000 (initial protected)
    //   Peak $1,500 -> floor $1,350
    //   Peak $2,400 -> floor $2,160
-   if(Use_Equity_Floor && initial_equity > 0 && !floor_breached)
+   // Floor keeps ratcheting up regardless of past breaches — it never stops tracking.
+   // Trading itself is NOT permanently halted on breach (per user rule: only the
+   // 3-loss daily stop should ever pause trading, and only until the next day).
+   // A breach just closes open positions to lock the gain; new trades resume
+   // immediately, sized down by the floor-proximity risk multiplier below.
+   if(Use_Equity_Floor && initial_equity > 0)
    {
       if(equity_high_water_mark >= initial_equity * (1.0 + Floor_Step_Pct / 100.0))
       {
@@ -177,14 +182,20 @@ void OnTick()
          }
       }
 
-      // Breach check — equity touched the locked floor
-      if(equity_floor > 0 && current_equity <= equity_floor)
+      // Breach check — equity touched the locked floor: close positions to lock
+      // the gain, but keep trading. CountPositions()>0 guard stops this firing
+      // every tick while equity idles at/below the floor with nothing open.
+      if(equity_floor > 0 && current_equity <= equity_floor && CountPositions() > 0)
       {
-         floor_breached = true;
-         Print("!!! EQUITY FLOOR BREACHED at $", DoubleToString(current_equity, 2),
-               " (floor: $", DoubleToString(equity_floor, 2), ") — TRADING HALTED. Restart EA to resume. !!!");
+         floor_breached = true;   // kept only for the heartbeat log, not a trading gate
+         Print("!!! EQUITY FLOOR TOUCHED at $", DoubleToString(current_equity, 2),
+               " (floor: $", DoubleToString(equity_floor, 2), ") — closing positions to lock gain. Trading continues. !!!");
          if(Close_All_On_Floor_Breach)
             CloseAllEAPositions();
+      }
+      else if(current_equity > equity_floor)
+      {
+         floor_breached = false;  // clear the log flag once back above the floor
       }
    }
    // --- End equity floor ---
@@ -233,7 +244,7 @@ void OnTick()
             " | Floor: $", DoubleToString(equity_floor, 2),
             daily_drawdown_hit ? " | [DD LIMIT]" : "",
             daily_consecutive_losses >= 3 ? " | [LOSS STOP]" : "",
-            floor_breached ? " | [FLOOR BREACHED - HALTED]" : "");
+            floor_breached ? " | [AT FLOOR]" : "");
    }
 
    // Manage trailing stops on every tick (before entry checks)
@@ -595,13 +606,10 @@ void CheckForTrades()
       return;
    }
 
-   // Hard block — equity floor was breached, trading halted until EA restart
-   if(floor_breached)
-   {
-      if(Show_Debug && tick_count % 500 == 0)
-         Print("Equity floor breached — trading halted. Floor: $", DoubleToString(equity_floor, 2));
-      return;
-   }
+   // Note: equity floor breach no longer halts trading — it only closes positions
+   // to lock the gain. Trading resumes immediately at a reduced size (see
+   // GetSmartRiskMultiplier floor-proximity step). The only conditions that
+   // pause trading are the two below, and both clear automatically next day.
 
    // Hard block — no new trades if today's trailing drawdown limit is breached
    if(daily_drawdown_hit)
