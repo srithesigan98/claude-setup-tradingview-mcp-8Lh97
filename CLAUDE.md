@@ -9,7 +9,19 @@ The user's original problem: the EA was profitable but would double the account
 and then give all the gains back by over-risking. All work since has been about
 money management, not the entry strategy.
 
-## Current version: v3.42 (HEAD)
+## Current version: v3.43 (HEAD)
+**v3.43 fix — critical:** v3.40's equity floor breach set `floor_breached=true`
+permanently, and `CheckForTrades()` hard-blocked all new entries while that flag
+was set, requiring a manual EA restart to clear. User reported a backtest chart
+that spiked then went dead flat for the rest of the run — this was the cause
+(one floor touch = trading dead forever). Fixed: floor breach still closes all
+EA positions to lock the gain, but `floor_breached` is now log-only; trading
+resumes immediately, protected by the existing floor-proximity risk shrink.
+User's explicit rule confirmed: the ONLY thing that should ever pause trading
+is 3 consecutive losses in a day, which already auto-resets at midnight. Win
+streaks are and always were uncapped (no stop logic was ever tied to wins).
+
+## Previous version: v3.42
 **v3.42 additions (on top of v3.41):**
 - Lot sizing rule replaced per explicit user spec: for every $100 (`Equity_Step_USD`)
   of profit growth above initial capital, add 0.03 lots (`Lot_Increase_Per_Step`).
