@@ -9,7 +9,19 @@ The user's original problem: the EA was profitable but would double the account
 and then give all the gains back by over-risking. All work since has been about
 money management, not the entry strategy.
 
-## Current version: v3.44 (HEAD)
+## Current version: v3.45 (HEAD)
+**v3.45:** Full line-by-line audit of all 1053 lines (no MT5/MetaEditor available
+in this environment — cannot compile or backtest directly, verified confirmed:
+no mql5/mt5/wine/metaeditor binaries, no .ex5 files found). Traced every
+trade-blocking condition; none latches permanently except the v3.43-fixed floor.
+Conclusion: remaining low-frequency/flat periods are the strict H4 3-EMA-stack
+signal condition simply not being met for stretches — a strategy characteristic,
+not a bug. Added `Simplified_Trend_Filter` (default false) as an opt-in A/B
+lever: true = H4 trend uses fast-vs-slow EMA only instead of full 3-EMA stack.
+STILL WAITING on user to run a backtest and share the Experts log — that's the
+only way to get real evidence past this point; static code review is exhausted.
+
+## Previous version: v3.44
 **v3.44 additions (per user's /goal + council decision):**
 - 20% margin cap per trade: `Max_Margin_Pct_Per_Trade` input, checked via
   `OrderCalcMargin()` in `EnterTrade()`. If required margin exceeds 20% of
