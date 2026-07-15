@@ -3,7 +3,7 @@
 //+------------------------------------------------------------------+
 
 #property copyright "Institutional Trader"
-#property version   "3.44"
+#property version   "3.45"
 #property description "v3.10 engine + Equity Floor + 5% Daily DD + 3-Loss Daily Stop + 20% Margin Cap + Full Rejection Logging"
 
 //=== STRATEGY PARAMETERS ===
@@ -57,6 +57,7 @@ input int ADX_Period = 14;                            // ADX period for trend st
 input double Min_ADX = 0.0;                           // ADX filter OFF by default (v3.10 style; set 20 to enable)
 input bool Require_Candle_Close_Confirm = false;      // Use last CLOSED bar's close vs EMA (filters live-tick noise)
 input bool Require_EMA_Slope = false;                 // Fast EMA must be rising(buy)/falling(sell), not flat
+input bool Simplified_Trend_Filter = false;           // OFF=strict 3-EMA H4 stack (v3.10 default). ON=fast vs slow only (more signals)
 
 //=== TRAILING STOP ===
 input group "=== TRAILING STOP ==="
@@ -696,7 +697,11 @@ int GetTradingSignal()
       confirm_price = iClose(_Symbol, Entry_Timeframe, 1);
 
    // BUY: Trend aligned up + entry fast EMA > medium EMA + price above fast EMA
-   bool trend_bull = (ema1_t[2] > ema2_t[2] && ema2_t[2] > ema3_t[2]);
+   // Simplified mode drops the strict 3-EMA stack requirement, using only
+   // fast vs slow — trades more often but with a looser trend definition.
+   bool trend_bull = Simplified_Trend_Filter ?
+                     (ema1_t[2] > ema3_t[2]) :
+                     (ema1_t[2] > ema2_t[2] && ema2_t[2] > ema3_t[2]);
    bool entry_bull = (ema1_e[2] > ema2_e[2]) && (confirm_price > ema1_e[2]);
    if(Require_EMA_Slope) entry_bull = entry_bull && (ema1_e[2] > ema1_e[1]);
 
@@ -707,7 +712,9 @@ int GetTradingSignal()
    }
 
    // SELL: Trend aligned down + entry fast EMA < medium EMA + price below fast EMA
-   bool trend_bear = (ema1_t[2] < ema2_t[2] && ema2_t[2] < ema3_t[2]);
+   bool trend_bear = Simplified_Trend_Filter ?
+                     (ema1_t[2] < ema3_t[2]) :
+                     (ema1_t[2] < ema2_t[2] && ema2_t[2] < ema3_t[2]);
    bool entry_bear = (ema1_e[2] < ema2_e[2]) && (confirm_price < ema1_e[2]);
    if(Require_EMA_Slope) entry_bear = entry_bear && (ema1_e[2] < ema1_e[1]);
 
